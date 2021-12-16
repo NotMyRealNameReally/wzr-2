@@ -30,6 +30,8 @@ struct ViewParameters
 	float shift_to_right;                        // przesunięcie kamery w prawo (w lewo o wart. ujemnej) - chodzi głównie o tryb edycji
 	float shift_to_bottom;                          // przesunięcie do dołu (w górę o wart. ujemnej)          i widok z góry (klawisz Q)  
 	char inscription1[512], inscription2[512];
+
+	char biddisplay[1024];
 };
 
 void StandardViewParametersSetting(ViewParameters *p);

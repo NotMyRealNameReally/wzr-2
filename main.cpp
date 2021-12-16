@@ -12,11 +12,19 @@
 #include <gl\glu.h>
 #include <iterator> 
 #include <map>
-using namespace std;
+#include <string>
+
 
 #include "objects.h"
 #include "graphics.h"
 #include "net.h"
+
+#undef min
+#undef max
+#include <cmath>>
+#include <algorithm>
+
+using namespace std;
 
 
 bool if_different_skills = true;          // czy zró¿nicowanie umiejêtnoœci (dla ka¿dego pojazdu losowane s¹ umiejêtnoœci
@@ -56,8 +64,33 @@ int cursor_x, cursor_y;                         // polo¿enie kursora myszki w c
 
 extern float TransferSending(int ID_receiver, int transfer_type, float transfer_value);
 
+const float BID_BASE_VAL = 10.0f;
+
+const float BID_TIMEOUT = 15.0f;
+
+struct Bid {
+	bool is_running = false;
+	int creator_ID;
+	bool has_bidders = false;
+	int best_bidder_ID;
+	float best_bid;
+	long last_bid_time;
+	float value;
+};
+
+float potential_bid;
+
+enum class bid_states {
+	NONE,
+	SET_FUEL,
+	SET_VALUE,
+};
+bid_states bid_stat = bid_states::NONE;
+
+Bid bid;
+
 enum frame_types {
-	OBJECT_STATE, ITEM_TAKING, ITEM_RENEWAL, COLLISION, TRANSFER
+	OBJECT_STATE, ITEM_TAKING, ITEM_RENEWAL, COLLISION, TRANSFER, START_BID, UP_BID
 };
 
 enum transfer_types { MONEY, FUEL};
@@ -79,7 +112,68 @@ struct Frame
 	int team_number;
 
 	long existing_time;        // czas jaki uplyn¹³ od uruchomienia programu
+
+	float bid_offer;
+	float bid_val;
 };
+
+float BidStep() {
+	return ceil(bid.best_bid / 100.0f);
+}
+float MaximumPossibleBid() {
+	return bid.best_bid - BidStep();
+}
+void SetMaximumBid() {
+	potential_bid = MaximumPossibleBid();
+}
+void UpBid() {
+	potential_bid = std::min(MaximumPossibleBid(), potential_bid + BidStep());
+}
+void DownBid() {
+	potential_bid = std::max(1.0f, potential_bid - BidStep());
+}
+
+void CreateBid() {
+	Frame f = Frame();
+	f.frame_type = frame_types::START_BID;
+	f.bid_val = bid.value;
+	f.bid_offer = bid.best_bid;
+	f.iID = my_vehicle->iID;
+
+	bid_stat = bid_states::NONE;
+
+	bid.is_running = true;
+	bid.creator_ID = my_vehicle->iID;
+	bid.has_bidders = false;
+
+	bid.creator_ID = my_vehicle->iID;
+
+	bid.last_bid_time = clock();
+
+	multi_send->send((char*)&f, sizeof(Frame));
+}
+
+void TakeBid() {
+	if (!bid.has_bidders)
+		potential_bid = bid.best_bid;
+
+	Frame f = Frame();
+	f.frame_type = frame_types::UP_BID;
+	f.bid_offer = potential_bid;
+	f.iID = my_vehicle->iID;
+	my_vehicle->state.amount_of_fuel -= bid.value;
+
+	bid_stat = bid_states::NONE;
+
+	bid.is_running = true;
+	bid.has_bidders = true;
+	bid.best_bidder_ID = my_vehicle->iID;
+	bid.best_bid = potential_bid;
+
+	bid.last_bid_time = clock();
+
+	multi_send->send((char*)&f, sizeof(Frame));
+}
 
 
 //******************************************
@@ -175,6 +269,28 @@ DWORD WINAPI ReceiveThreadFunction(void *ptr)
 			}
 			break;
 		}
+		case START_BID:
+		{
+			bid.creator_ID = frame.iID;
+			bid.best_bid = frame.bid_offer;
+			bid.value = frame.bid_val;
+			bid.is_running = true;
+			bid.has_bidders = false;
+			potential_bid = MaximumPossibleBid();
+			bid.last_bid_time = clock();
+			break;
+		}
+		case UP_BID:
+		{
+			if (bid.best_bidder_ID == my_vehicle->iID && frame.iID != my_vehicle->iID)
+				my_vehicle->state.amount_of_fuel += bid.value;
+			bid.has_bidders = true;
+			bid.best_bid = frame.bid_offer;
+			bid.best_bidder_ID = frame.iID;
+			potential_bid = MaximumPossibleBid();
+			bid.last_bid_time = clock();
+			break;
+		}
 		
 		} // switch po typach ramek
 		// Opuszczenie ścieżki krytycznej / Release the Critical section
@@ -218,6 +334,66 @@ void InteractionInitialisation()
 void VirtualWorldCycle()
 {
 	counter_of_simulations++;
+
+	if (bid.is_running) {
+		float sec_left = BID_TIMEOUT - (((float)(clock() - bid.last_bid_time)) / CLOCKS_PER_SEC);
+		if (sec_left <= 0) {
+			if (bid.has_bidders) {
+				if (bid.best_bidder_ID == my_vehicle->iID) {
+					my_vehicle->state.amount_of_fuel += bid.value;
+					TransferSending(bid.creator_ID, transfer_types::FUEL, bid.value);
+				} else if (bid.creator_ID == my_vehicle->iID) {
+					TransferSending(bid.best_bidder_ID, transfer_types::MONEY, bid.best_bid);
+				}
+			}
+			bid.is_running = false;
+			bid.has_bidders = false;
+		} else {
+			std::string msg = "";
+			if (my_vehicle->iID == bid.creator_ID) {
+				msg += "You_started_a_bid_for_" + std::to_string(bid.value) + "_fuel._";
+			} else {
+				msg += std::to_string(bid.creator_ID) + " has_started_a_bid_for_" + std::to_string(bid.value) + "_fuel._";
+			}
+			if (bid.has_bidders) {
+				if (bid.best_bidder_ID == my_vehicle->iID) {
+					msg += "You_made_a_bid_for_" + std::to_string(bid.best_bid) + "._";
+				} else {
+					msg += "The_current_offer_is_" + std::to_string(bid.best_bid);
+					msg += ",_made_by_" + std::to_string(bid.best_bidder_ID) + "._";
+
+					if (my_vehicle->iID == bid.creator_ID) {
+
+					} else if (bid.value > my_vehicle->state.amount_of_fuel) {
+						msg += "You_don't_have_enough_fuel_to_make_an_offer!_";
+					} else if (bid.best_bid == 1.0f) {
+						msg += "Lowest_possible_bid_reached._";
+					} else {
+						msg += "Press_(T)_to_bid_for_" + std::to_string(potential_bid) + "_or_1/2_to_adjust_your_bid._";
+					}
+				}
+			} else {
+				msg += "The_initial_offer_is_" + std::to_string(bid.best_bid) + "._";
+				if (my_vehicle->iID == bid.creator_ID) {
+
+				} else if (bid.value > my_vehicle->state.amount_of_fuel) {
+					msg += "You_don't_have_enough_fuel_to_enter_the_bid!_";
+				} else {
+					msg += "Press_(T)_to_enter_the_bid!_";
+				}
+			}
+			msg += "The_bid_will_end_in_" + std::to_string(sec_left) + "s";
+			sprintf(par_view.biddisplay, "%s", msg.c_str());
+		}
+	} else if (bid_stat == bid_states::SET_FUEL) {
+		sprintf(par_view.biddisplay, "Offer_to_buy_%0.1f_fuel_press_(T)_to proceed,_(1)_and_(2)_to_adjust.", bid.value);
+	} else if (bid_stat == bid_states::SET_VALUE) {
+		sprintf(par_view.biddisplay, "Offer_to_buy_%0.1f_fuel_for_%0.1f._Press_(T)_to_send_offer,_(1)_and_(2)_to_adjust.", bid.value, bid.best_bid);
+	} else if (my_vehicle->state.money > BID_BASE_VAL)
+		sprintf(par_view.biddisplay, "No_bids_running._Press_(T)_to_start_one.");
+	else
+		sprintf(par_view.biddisplay, "No_bids_running._Insufficient_money_to_start_one.");
+
 
 	// obliczenie œredniego czasu pomiêdzy dwoma kolejnnymi symulacjami po to, by zachowaæ  fizycznych 
 	if (counter_of_simulations % 50 == 0)          // jeœli licznik cykli przekroczy³ pewn¹ wartoœæ, to
@@ -593,6 +769,54 @@ void MessagesHandling(UINT message_type, WPARAM wParam, LPARAM lParam)
 
 		switch (LOWORD(wParam))
 		{
+			case 'T':
+			{
+				// Start a bid
+				if (bid_stat == bid_states::NONE && !bid.is_running) {
+					bid_stat = bid_states::SET_FUEL;
+					bid.value = BID_BASE_VAL;
+					bid.best_bid = BID_BASE_VAL;
+				} else if (bid_stat == bid_states::SET_FUEL) {
+					bid_stat = bid_states::SET_VALUE;
+					bid.best_bid = BID_BASE_VAL;
+				} else if (bid_stat == bid_states::SET_VALUE) {
+					CreateBid();
+				} else if (bid.is_running && bid.creator_ID != my_vehicle->iID && bid.best_bidder_ID != my_vehicle->iID && bid.value < my_vehicle->state.amount_of_fuel) {
+					TakeBid();
+				}
+				break;
+			}
+			case '1':
+			{
+				if (bid_stat == bid_states::SET_FUEL) {
+					if (bid.value > BID_BASE_VAL) {
+						bid.value -= BID_BASE_VAL;
+					}
+				} else if (bid_stat == bid_states::SET_VALUE) {
+					if (bid.best_bid > BID_BASE_VAL) {
+						bid.best_bid -= BID_BASE_VAL;
+					}
+				} else if (bid.is_running && bid.creator_ID != my_vehicle->iID && bid.best_bidder_ID != my_vehicle->iID) {
+					UpBid();
+				}
+				break;
+			}
+			case '2':
+			{
+				if (bid_stat == bid_states::SET_FUEL) {
+					if (bid.value < 100.0f * BID_BASE_VAL) {
+						bid.value += BID_BASE_VAL;
+					}
+				} else if (bid_stat == bid_states::SET_VALUE) {
+					if (bid.best_bid < bid.value * BID_BASE_VAL * 2) {
+						if (bid.best_bid + BID_BASE_VAL < my_vehicle->state.money)
+							bid.best_bid += BID_BASE_VAL;
+					}
+				} else if (bid.is_running && bid.creator_ID != my_vehicle->iID && bid.best_bidder_ID != my_vehicle->iID) {
+					DownBid();
+				}
+				break;
+			}
 		case VK_SHIFT:
 		{
 			SHIFT_pressed = 1;

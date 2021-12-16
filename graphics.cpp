@@ -147,6 +147,8 @@ void DrawScene()
 	glRasterPos2f(4.0, -4.0);
 	glPrint("%s", par_view.inscription1);
 	glPrint("%s", par_view.inscription2);
+	glRasterPos2f(1.0, -6.0);
+	glPrint("%s", par_view.biddisplay);
 	glLoadIdentity();
 
 
